@@ -10,7 +10,8 @@ use std::borrow::Cow;
 use tw_coin_entry::coin_context::CoinContext;
 use tw_coin_entry::error::prelude::*;
 use tw_coin_entry::signing_output_error;
-use tw_encoding::{base58, base64};
+use tw_encoding::base58;
+use tw_encoding::base64::{self, STANDARD};
 use tw_proto::Solana::Proto;
 
 pub struct SolanaSigner;
@@ -29,8 +30,8 @@ impl SolanaSigner {
         input: Proto::SigningInput<'_>,
     ) -> SigningResult<Proto::SigningOutput<'static>> {
         let encode = move |data| match input.tx_encoding {
-            Proto::Encoding::Base58 => base58::encode(data, &SOLANA_ALPHABET),
-            Proto::Encoding::Base64 => base64::encode(data, false),
+            Proto::Encoding::Base58 => base58::encode(data, SOLANA_ALPHABET),
+            Proto::Encoding::Base64 => base64::encode(data, STANDARD),
         };
 
         let builder = MessageBuilder::new(input);
@@ -39,7 +40,7 @@ impl SolanaSigner {
         let unsigned_msg = builder.build()?;
 
         let encoded_unsigned = bincode::serialize(&unsigned_msg)
-            .tw_err(|_| SigningErrorType::Error_internal)
+            .tw_err(SigningErrorType::Error_internal)
             .context("Error serializing Solana Message as 'bincode'")?;
         let encoded_unsigned = encode(&encoded_unsigned);
 
@@ -47,7 +48,7 @@ impl SolanaSigner {
             TxSigner::sign_versioned(unsigned_msg, &signing_keys, &external_signatures)?;
 
         let encoded_tx = bincode::serialize(&signed_tx)
-            .tw_err(|_| SigningErrorType::Error_internal)
+            .tw_err(SigningErrorType::Error_internal)
             .context("Error serializing Solana Transaction as 'bincode'")?;
         let encoded_tx = encode(&encoded_tx);
 
