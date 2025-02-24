@@ -12,20 +12,20 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: github.event.pull_request.draft == false
     steps:
     - uses: actions/checkout@v3
     - name: Install system dependencies
       run: |
-        tools/install-sys-dependencies-linux ci
+        tools/install-sys-dependencies-linux
         tools/install-rust-dependencies
     - name: Cache internal dependencies
       id: internal_cache
       uses: actions/cache@v3
       with:
         path: build/local
-        key: ${{ runner.os }}-internal-${{ hashFiles('tools/install-sys-dependencies-linux') }}-${{ hashFiles('tools/install-dependencies') }}
+        key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tools/install-sys-dependencies-linux') }}-internal-${{ hashFiles('tools/install-dependencies') }}-${{ hashFiles('tools/dependencies-version') }}
     - name: Install internal dependencies
       run: |
         tools/install-dependencies

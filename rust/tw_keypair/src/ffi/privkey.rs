@@ -15,6 +15,12 @@ pub struct TWPrivateKey(pub(crate) PrivateKey);
 
 impl RawPtrTrait for TWPrivateKey {}
 
+impl AsRef<PrivateKey> for TWPrivateKey {
+    fn as_ref(&self) -> &PrivateKey {
+        &self.0
+    }
+}
+
 /// Create a private key with the given block of data.
 ///
 /// \param input *non-null* byte array.
@@ -42,6 +48,28 @@ pub unsafe extern "C" fn tw_private_key_create_with_data(
 pub unsafe extern "C" fn tw_private_key_delete(key: *mut TWPrivateKey) {
     // Take the ownership back to rust and drop the owner.
     let _ = TWPrivateKey::from_ptr(key);
+}
+
+/// Returns the raw pointer to the underlying bytes of the private key.
+///
+/// \param data A non-null valid block of private key
+/// \return the raw pointer to the contents of private key
+#[no_mangle]
+pub unsafe extern "C" fn tw_private_key_bytes(data: *const TWPrivateKey) -> *const u8 {
+    TWPrivateKey::from_ptr_as_ref(data)
+        .map(|data| data.0.bytes().as_ptr())
+        .unwrap_or_else(std::ptr::null)
+}
+
+/// Returns the size in bytes.
+///
+/// \param data A non-null valid block of private key
+/// \return the size of the given block of private key
+#[no_mangle]
+pub unsafe extern "C" fn tw_private_key_size(data: *const TWPrivateKey) -> usize {
+    TWPrivateKey::from_ptr_as_ref(data)
+        .map(|data| data.0.bytes().len())
+        .unwrap_or_default()
 }
 
 /// Determines if the given private key is valid or not.
