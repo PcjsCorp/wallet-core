@@ -9,6 +9,8 @@ use crate::error::prelude::*;
 #[derive(Clone)]
 pub enum AddressPrefix {
     Hrp(String),
+    BitcoinBase58(BitcoinBase58Prefix),
+    SubstrateNetwork(u16),
 }
 
 /// A blockchain's address prefix should be convertable from an `AddressPrefix`.
@@ -26,6 +28,23 @@ impl TryFrom<AddressPrefix> for NoPrefix {
     #[inline]
     fn try_from(_: AddressPrefix) -> Result<Self, Self::Error> {
         Err(AddressError::UnexpectedAddressPrefix)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct BitcoinBase58Prefix {
+    pub p2pkh: u8,
+    pub p2sh: u8,
+}
+
+impl TryFrom<AddressPrefix> for BitcoinBase58Prefix {
+    type Error = AddressError;
+
+    fn try_from(value: AddressPrefix) -> Result<Self, Self::Error> {
+        match value {
+            AddressPrefix::BitcoinBase58(base58) => Ok(base58),
+            _ => Err(AddressError::UnexpectedAddressPrefix),
+        }
     }
 }
 

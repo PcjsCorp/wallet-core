@@ -5,15 +5,16 @@
 #include <jni.h>
 #include <string.h>
 #include <stdint.h>
+#include <fstream>
 
-static JavaVM* cachedJVM;
+static JavaVM* cachedJVM = nullptr;
 
 extern "C" {
     uint32_t random32();
     void random_buffer(uint8_t *buf, size_t len);
 }
 
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *jvm, void *reserved) {
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *jvm, [[maybe_unused]] void *reserved) {
     cachedJVM = jvm;
     return JNI_VERSION_1_2;
 }
@@ -25,8 +26,20 @@ uint32_t random32() {
 }
 
 void random_buffer(uint8_t *buf, size_t len) {
-    JNIEnv *env;
+    // Check whether the JVM instance has been set at `JNI_OnLoad`.
+    // https://github.com/trustwallet/wallet-core/pull/3984
+    if (cachedJVM == nullptr) {
+        std::ifstream randomData("/dev/urandom", std::ios::in | std::ios::binary);
+        if (!randomData.is_open()) {
+            throw std::runtime_error("Error opening '/dev/urandom'");
+        }
 
+        randomData.read(reinterpret_cast<char*>(buf), len);
+        randomData.close();
+        return;
+    }
+
+    JNIEnv *env;
 #if defined(__ANDROID__) || defined(ANDROID)
     cachedJVM->AttachCurrentThread(&env, nullptr);
 #else
