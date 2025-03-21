@@ -12,3 +12,6 @@ pub mod wallet_connect_request;
 
 #[cfg(feature = "test-utils")]
 pub mod test_utils;
+pub mod transaction_util;
+
+pub type TWFFICoinType = u32;

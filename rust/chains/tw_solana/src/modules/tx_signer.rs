@@ -44,13 +44,6 @@ impl TxSigner {
     ) -> SigningResult<versioned::VersionedTransaction> {
         let mut tx = versioned::VersionedTransaction::unsigned(unsigned_msg);
 
-        let actual_signatures = key_signs.len();
-        let expected_signatures = tx.message.num_required_signatures();
-        if actual_signatures != expected_signatures {
-            return SigningError::err(SigningErrorType::Error_signatures_count)
-                .with_context(|| format!("Expected '{expected_signatures}' signatures, provided '{actual_signatures}'"));
-        }
-
         for (signing_pubkey, ed25519_signature) in key_signs {
             // Find an index of the corresponding account.
             let account_index = tx
@@ -73,7 +66,7 @@ impl TxSigner {
 
     pub fn preimage_versioned(msg: &versioned::VersionedMessage) -> SigningResult<Data> {
         bincode::serialize(&msg)
-            .tw_err(|_| SigningErrorType::Error_internal)
+            .tw_err(SigningErrorType::Error_internal)
             .context("Error serializing Solana Message as 'bincode'")
     }
 }

@@ -9,17 +9,24 @@ use crate::abi::prebuild::erc4337::{Erc4337SimpleAccount, ExecuteArgs};
 use crate::abi::prebuild::erc721::Erc721;
 use crate::address::{Address, EvmAddress};
 use crate::evm_context::EvmContext;
+use crate::transaction::access_list::{Access, AccessList};
 use crate::transaction::transaction_eip1559::TransactionEip1559;
 use crate::transaction::transaction_non_typed::TransactionNonTyped;
 use crate::transaction::user_operation::UserOperation;
+use crate::transaction::user_operation_v0_7::UserOperationV0_7;
 use crate::transaction::UnsignedTransactionBox;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use tw_coin_entry::error::prelude::*;
+use tw_hash::H256;
 use tw_memory::Data;
 use tw_number::U256;
 use tw_proto::Common::Proto::SigningError as CommonError;
 use tw_proto::Ethereum::Proto;
+use Proto::mod_SigningInput::OneOfuser_operation_oneof as UserOp;
+use Proto::mod_Transaction::OneOftransaction_oneof as Tx;
+use Proto::SCAccountType;
+use Proto::TransactionMode as TxMode;
 
 pub struct TxBuilder<Context: EvmContext> {
     _phantom: PhantomData<Context>,
@@ -29,9 +36,6 @@ impl<Context: EvmContext> TxBuilder<Context> {
     pub fn tx_from_proto(
         input: &Proto::SigningInput<'_>,
     ) -> SigningResult<Box<dyn UnsignedTransactionBox>> {
-        use Proto::mod_Transaction::OneOftransaction_oneof as Tx;
-        use Proto::TransactionMode as TxMode;
-
         let Some(ref transaction) = input.transaction else {
             return SigningError::err(CommonError::Error_invalid_params)
                 .context("No transaction specified");
@@ -143,11 +147,15 @@ impl<Context: EvmContext> TxBuilder<Context> {
                     .iter()
                     .map(Self::erc4337_execute_call_from_proto)
                     .collect::<Result<Vec<_>, _>>()?;
-                let payload = Erc4337SimpleAccount::encode_execute_batch(calls)
-                    .map_err(abi_to_signing_error)?;
+                let user_op_payload = match input.user_operation_mode {
+                    SCAccountType::SimpleAccount => {
+                        Erc4337SimpleAccount::encode_execute_batch(calls)
+                    },
+                    SCAccountType::Biz4337 => Erc4337SimpleAccount::encode_execute_4337_ops(calls),
+                }
+                .map_err(abi_to_signing_error)?;
 
-                return Self::user_operation_from_proto(input, payload)
-                    .map(UserOperation::into_boxed);
+                return Self::user_operation_from_proto(input, user_op_payload);
             },
             Tx::None => {
                 return SigningError::err(SigningErrorType::Error_invalid_params)
@@ -166,18 +174,40 @@ impl<Context: EvmContext> TxBuilder<Context> {
                 let to = to
                     .or_tw_err(SigningErrorType::Error_invalid_address)
                     .context("No contract/destination address specified")?;
-                // Payload should match the ERC4337 standard.
-                let payload = Erc4337SimpleAccount::encode_execute(ExecuteArgs {
+                let args = ExecuteArgs {
                     to,
                     value: eth_amount,
                     data: payload,
-                })
-                .map_err(abi_to_signing_error)?;
+                };
 
-                Self::user_operation_from_proto(input, payload)?.into_boxed()
+                let user_op_payload = match input.user_operation_mode {
+                    SCAccountType::SimpleAccount => Erc4337SimpleAccount::encode_execute(args),
+                    SCAccountType::Biz4337 => Erc4337SimpleAccount::encode_execute_4337_op(args),
+                }
+                .map_err(abi_to_signing_error)?;
+                Self::user_operation_from_proto(input, user_op_payload)?
             },
         };
         Ok(tx)
+    }
+
+    #[inline]
+    fn user_operation_from_proto(
+        input: &Proto::SigningInput<'_>,
+        user_op_payload: Data,
+    ) -> SigningResult<Box<dyn UnsignedTransactionBox>> {
+        match input.user_operation_oneof {
+            UserOp::user_operation_v0_7(ref user_op_v0_7) => {
+                Self::user_operation_v0_7_from_proto(input, user_op_v0_7, user_op_payload)
+                    .map(UserOperationV0_7::into_boxed)
+            },
+            UserOp::user_operation(ref user_op) => {
+                Self::user_operation_v0_6_from_proto(input, user_op, user_op_payload)
+                    .map(UserOperation::into_boxed)
+            },
+            UserOp::None => SigningError::err(SigningErrorType::Error_invalid_params)
+                .context("No user operation specified"),
+        }
     }
 
     #[inline]
@@ -249,6 +279,9 @@ impl<Context: EvmContext> TxBuilder<Context> {
             .into_tw()
             .context("Invalid max fee per gas")?;
 
+        let access_list =
+            Self::parse_access_list(&input.access_list).context("Invalid access list")?;
+
         Ok(TransactionEip1559 {
             nonce,
             max_inclusion_fee_per_gas,
@@ -257,18 +290,15 @@ impl<Context: EvmContext> TxBuilder<Context> {
             to: to_address,
             amount: eth_amount,
             payload,
+            access_list,
         })
     }
 
-    fn user_operation_from_proto(
+    fn user_operation_v0_6_from_proto(
         input: &Proto::SigningInput,
+        user_op: &Proto::UserOperation,
         erc4337_payload: Data,
     ) -> SigningResult<UserOperation> {
-        let Some(ref user_op) = input.user_operation else {
-            return SigningError::err(CommonError::Error_invalid_params)
-                .context("No user operation specified");
-        };
-
         let nonce = U256::from_big_endian_slice(&input.nonce)
             .into_tw()
             .context("Invalid nonce")?;
@@ -315,19 +345,129 @@ impl<Context: EvmContext> TxBuilder<Context> {
         })
     }
 
-    #[inline]
+    fn user_operation_v0_7_from_proto(
+        input: &Proto::SigningInput,
+        user_op_v0_7: &Proto::UserOperationV0_7,
+        erc4337_payload: Data,
+    ) -> SigningResult<UserOperationV0_7> {
+        let sender = Self::parse_address(user_op_v0_7.sender.as_ref())
+            .context("Invalid User Operation sender")?;
+
+        let nonce = U256::from_big_endian_slice(&input.nonce)
+            .into_tw()
+            .context("Invalid nonce")?;
+
+        let factory = Self::parse_address_optional(user_op_v0_7.factory.as_ref())
+            .context("Invalid factory address")?;
+
+        let call_data_gas_limit = U256::from_big_endian_slice(&input.gas_limit)
+            .into_tw()
+            .context("Invalid gas limit")?
+            .try_into()
+            .into_tw()
+            .context("Gas limit exceeds u128")?;
+
+        let verification_gas_limit =
+            U256::from_big_endian_slice(&user_op_v0_7.verification_gas_limit)
+                .into_tw()
+                .context("Invalid verification gas limit")?
+                .try_into()
+                .into_tw()
+                .context("Verification gas limit exceeds u128")?;
+
+        let pre_verification_gas = U256::from_big_endian_slice(&user_op_v0_7.pre_verification_gas)
+            .into_tw()
+            .context("Invalid pre-verification gas")?;
+
+        let max_fee_per_gas = U256::from_big_endian_slice(&input.max_fee_per_gas)
+            .into_tw()
+            .context("Invalid max fee per gas")?
+            .try_into()
+            .into_tw()
+            .context("Max fee per gas exceeds u128")?;
+
+        let max_priority_fee_per_gas =
+            U256::from_big_endian_slice(&input.max_inclusion_fee_per_gas)
+                .into_tw()
+                .context("Invalid max inclusion fee per gas")?
+                .try_into()
+                .into_tw()
+                .context("Max inclusion fee per gas exceeds u128")?;
+
+        let paymaster = Self::parse_address_optional(user_op_v0_7.paymaster.as_ref())
+            .context("Invalid paymaster address")?;
+
+        let paymaster_verification_gas_limit =
+            U256::from_big_endian_slice(&user_op_v0_7.paymaster_verification_gas_limit)
+                .into_tw()
+                .context("Invalid paymaster verification gas limit")?
+                .try_into()
+                .into_tw()
+                .context("Paymaster verification gas limit exceeds u128")?;
+
+        let paymaster_post_op_gas_limit =
+            U256::from_big_endian_slice(&user_op_v0_7.paymaster_post_op_gas_limit)
+                .into_tw()
+                .context("Invalid paymaster post-op gas limit")?
+                .try_into()
+                .into_tw()
+                .context("Paymaster post-op gas limit exceeds u128")?;
+
+        let entry_point = Self::parse_address(user_op_v0_7.entry_point.as_ref())
+            .context("Invalid entry point")?;
+
+        Ok(UserOperationV0_7 {
+            sender,
+            nonce,
+            factory,
+            factory_data: user_op_v0_7.factory_data.to_vec(),
+            call_data: erc4337_payload,
+            call_data_gas_limit,
+            verification_gas_limit,
+            pre_verification_gas,
+            max_fee_per_gas,
+            max_priority_fee_per_gas,
+            paymaster,
+            paymaster_verification_gas_limit,
+            paymaster_post_op_gas_limit,
+            paymaster_data: user_op_v0_7.paymaster_data.to_vec(),
+            entry_point,
+        })
+    }
+
     fn parse_address(addr: &str) -> SigningResult<Address> {
         Context::Address::from_str(addr)
             .map(Context::Address::into)
             .map_err(SigningError::from)
     }
 
-    #[inline]
     fn parse_address_optional(addr: &str) -> SigningResult<Option<Address>> {
         match Context::Address::from_str_optional(addr) {
             Ok(Some(addr)) => Ok(Some(addr.into())),
             Ok(None) => Ok(None),
             Err(e) => Err(SigningError::from(e)),
         }
+    }
+
+    fn parse_access_list(list_proto: &[Proto::Access]) -> SigningResult<AccessList> {
+        let mut access_list = AccessList::default();
+        for access_proto in list_proto.iter() {
+            access_list.add_access(Self::parse_access(access_proto)?);
+        }
+        Ok(access_list)
+    }
+
+    fn parse_access(access_proto: &Proto::Access) -> SigningResult<Access> {
+        let addr =
+            Self::parse_address(access_proto.address.as_ref()).context("Invalid access address")?;
+
+        let mut access = Access::new(addr);
+        for key_proto in access_proto.stored_keys.iter() {
+            let storage_key = H256::try_from(key_proto.as_ref())
+                .tw_err(SigningErrorType::Error_invalid_params)
+                .context("Invalid storage key")?;
+            access.add_storage_key(storage_key);
+        }
+        Ok(access)
     }
 }
